@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONUNBUFFERED: "1"
-      # あれば既存の環境変数もここに（例：APIキーは Secrets からステップで環境へ渡す）
+      # ※ 取得系で使う環境変数はステップごとに Secrets から渡します
 
     steps:
       - name: Checkout
@@ -26,7 +26,6 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # ここは既存のビルド・集計処理に合わせて調整してください
       - name: Build & Package EOD report
         env:
           TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
@@ -38,7 +37,8 @@ jobs:
         run: |
           set -e
           python -m scripts.fetch_and_build --universe data/universe_2025-09.csv --outdir reports
-          # 成果物を ZIP 化（ファイル/フォルダいずれにも対応）
+
+          # 成果物を ZIP 化（既に zip がある場合はスキップ）
           cd reports
           if compgen -G "*.zip" > /dev/null; then
             echo "ZIP already exists:"
@@ -57,49 +57,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # —— ここから ChatGPT 転送のための処理（artifact を取り直してもOK）——
-      - name: Download EOD artifact
-        if: always()
-        uses: actions/download-artifact@v4
-        with:
-          name: us-eod-report
-          path: artifact_out
-
-      - name: Inspect artifact
+      - name: Append summary (digest)
         if: always()
         run: |
-          echo "Files downloaded under artifact_out/:"
-          ls -lR artifact_out || true
-
-      # artifact がフォルダ一式でも zip でも動くように ZIP を保証
-      - name: Ensure ZIP exists
-        if: always()
-        run: |
-          set -e
-          ZIP_CANDIDATE=$(ls artifact_out/*.zip 2>/dev/null || true)
-          if [ -z "$ZIP_CANDIDATE" ]; then
-            echo "No zip found; creating zip from directory..."
-            (cd artifact_out && zip -r us-eod-report.zip .)
-            echo "ZIP_GLOB=artifact_out/us-eod-report.zip" >> $GITHUB_ENV
+          echo "## Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Name: \`us-eod-report\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Path: \`reports/us-eod-report.zip\`" >> $GITHUB_STEP_SUMMARY
+          if [ -f reports/us-eod-report.zip ]; then
+            DIGEST=$(sha256sum reports/us-eod-report.zip | awk '{print $1}')
+            SIZE=$(ls -lh reports/us-eod-report.zip | awk '{print $5}')
+            echo "- Size: ${SIZE}" >> $GITHUB_STEP_SUMMARY
+            echo "- SHA256: \`${DIGEST}\`" >> $GITHUB_STEP_SUMMARY
           else
-            echo "Found zip: $ZIP_CANDIDATE"
-            echo "ZIP_GLOB=$ZIP_CANDIDATE" >> $GITHUB_ENV
+            echo "- *(zip not found at summarize step)*" >> $GITHUB_STEP_SUMMARY
           fi
-
-      - name: Install runtime deps for ChatGPT transfer
-        if: always()
-        run: |
-          pip install --upgrade --quiet requests
-          chmod +x scripts/send_to_chatgpt.py
-
-      - name: Send ZIP to ChatGPT (OpenAI Assistants API)
-        if: always()
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
-          # 既存のスレッドに積み上げたい場合のみ設定（なければ未設定のまま）
-          OPENAI_THREAD_ID: ${{ secrets.OPENAI_THREAD_ID }}
-          ZIP_GLOB: ${{ env.ZIP_GLOB }}
-          MESSAGE_JA: "本日のEOD ZIP（us-eod-report）を添付します。ユニバースのファンダメンタル更新と注目銘柄抽出をお願いします。"
-        run: |
-          python scripts/send_to_chatgpt.py
