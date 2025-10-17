@@ -1,22 +1,18 @@
 import argparse
 import os
-import math
-import time
-import json
-from datetime import datetime
 from typing import List, Dict, Any
 
 import pandas as pd
 
 from scripts.providers import (
-    price_tiingo,
-    price_yfinance,
-    usd_jpy_yfinance,
-    next_event_yfinance,
+    yf_download_prices_batched,
+    fill_missing_prices,
+    usd_jpy_rate,
     alpha_overview,
     alpha_statements,
     AlphaBudget,
-    RateLimit,
+    yf_info_pe_ps_div,
+    yf_next_event_date,
 )
 
 from scripts.utils import (
@@ -110,13 +106,10 @@ def _fmt_num(x):
 
 
 def _df_to_markdown(df: pd.DataFrame) -> str:
-    """
-    安全な Markdown 変換。`tabulate` が無い/壊れていてもフォールバック。
-    """
     try:
         return df.to_markdown(index=False)
     except Exception:
-        # 簡易フォールバック：|区切りテーブル
+        # 簡易フォールバック
         cols = list(df.columns)
         header = "| " + " | ".join(cols) + " |"
         sep = "| " + " | ".join(["---"] * len(cols)) + " |"
@@ -138,10 +131,15 @@ def main(universe, outdir):
     os.makedirs(f"{outdir}/{d}", exist_ok=True)
     uni = pd.read_csv(universe)
 
-    # USD/JPY
-    usdjpy = usd_jpy_yfinance()
+    # -------- Prices (Yahoo batched -> Tiingo/Alpha/Stooq for gaps) --------
+    tickers = list(uni["Ticker"])
+    prices = yf_download_prices_batched(tickers)
+    prices = fill_missing_prices(prices)
 
-    # Alpha 回転パラメータ
+    # -------- FX --------
+    usdjpy = usd_jpy_rate()
+
+    # -------- Alpha rotation params --------
     daily_budget = int(os.getenv("ALPHA_DAILY_BUDGET", "24"))
     refresh_days = int(os.getenv("ALPHA_REFRESH_DAYS", "30"))
     stale_days = int(os.getenv("EXTENDED_STALE_DAYS", "7"))
@@ -149,10 +147,15 @@ def main(universe, outdir):
     calls_per_ticker = 3  # income, balance, cashflow
     tpd = max(1, daily_budget // calls_per_ticker)
 
-    tickers = list(uni["Ticker"])
     n = len(tickers)
     start = (d.toordinal() * tpd) % max(1, n)
     to_refresh = [tickers[(start + i) % n] for i in range(min(tpd, n))]
+
+    # -------- Yahoo info/events budgets --------
+    yf_info_budget = int(os.getenv("YF_INFO_BUDGET", "120"))
+    yf_event_budget = int(os.getenv("YF_EVENT_BUDGET", "50"))
+    info_used = 0
+    event_used = 0
 
     rows: List[Dict[str, Any]] = []
     missing = []  # for Missing/Stale summary
@@ -160,43 +163,37 @@ def main(universe, outdir):
     for _, r in uni.iterrows():
         tkr, name, asset, nisa = r["Ticker"], r["Name"], r["Asset"], r["NISA"]
 
-        # --- Prices ---
-        close = None
-        # Tiingo → yfinance → stooq（yfinance内部でフォールバック実施）
-        try:
-            close = price_tiingo(tkr)
-        except RateLimit:
-            close = price_yfinance(tkr)
-        if close is None:
-            close = price_yfinance(tkr)
-
+        close = prices.get(tkr)
         price_jpy = close * usdjpy if (close is not None and usdjpy is not None) else None
 
-        # --- Core fundamentals (P/E, P/S, dividend) ---
+        # Core fundamentals: Alpha OVERVIEW first
         pe = ps = dy = None
+        got_alpha = False
         try:
-            # まず Alpha OVERVIEW（無料の枠が余っていれば）
             ov = alpha_overview(tkr)
             pe = _to_f(ov.get("PERatio"))
             ps = _to_f(ov.get("PriceToSalesRatioTTM"))
             dy_raw = _to_f(ov.get("DividendYield"))
             dy = dy_raw * 100 if dy_raw is not None else None
+            got_alpha = True
         except Exception:
-            # yfinance fallback（429なら無理せず諦めてN/Aで継続）
-            try:
-                info = __import__("yfinance").Ticker(tkr).info
-                pe = pe or info.get("trailingPE")
-                ps = ps or info.get("priceToSalesTrailing12Months")
-                yld = info.get("dividendYield")
-                if dy is None and yld is not None:
-                    dy = float(yld) * 100
-            except Exception:
-                pass
+            pass
 
-        # イベントは 429 回避のため「株のみ」取得（ETFは取得負荷が高い & 重要度低）
-        nxt = None
-        if str(asset).strip() == "株":
-            nxt = next_event_yfinance(tkr)
+        # If missing, try Yahoo info within budget
+        if (pe is None or ps is None or dy is None) and info_used < yf_info_budget:
+            p2, s2, d2 = yf_info_pe_ps_div(tkr)
+            info_used += 1
+            pe = pe if pe is not None else p2
+            ps = ps if ps is not None else s2
+            dy = dy if dy is not None else d2
+
+        # Next Event: only for stocks and within budget
+        nxt = "N/A"
+        if str(asset).strip() == "株" and event_used < yf_event_budget:
+            ev = yf_next_event_date(tkr)
+            event_used += 1
+            if ev:
+                nxt = ev
 
         core = {
             "Ticker": tkr,
@@ -208,12 +205,12 @@ def main(universe, outdir):
             "P/E(TTM)": _fmt_n(pe),
             "P/S(TTM)": _fmt_n(ps),
             "Div. Yield%": _fmt_n(dy),
-            "Next Event": nxt if nxt else "N/A",
+            "Next Event": nxt,
             "Asset": asset,
             "NISA": nisa,
         }
 
-        # --- Extended (Alpha statements + cache) ---
+        # -------- Extended (Alpha statements + cache, 日割りローテーション) --------
         ext = {k: "N/A" for k in EXT_COLS}
         try:
             refresh = (tkr in to_refresh)
@@ -284,9 +281,7 @@ def main(universe, outdir):
 
             net_debt = (debt_total or 0) - ((cash or 0) + (sti or 0))
             ext["D/E"] = _fmt_num(safe_div(debt_total, tot_equity))
-            ext["Equity Ratio%"] = (
-                _fmt_pct(safe_div(tot_equity, tot_assets) * 100.0) if (tot_equity and tot_assets) else "N/A"
-            )
+            ext["Equity Ratio%"] = _fmt_pct(safe_div(tot_equity, tot_assets) * 100.0) if (tot_equity and tot_assets) else "N/A"
             ext["Current Ratio"] = _fmt_num(safe_div(cur_assets, cur_liab))
             quick = safe_div((cash or 0) + (sti or 0), cur_liab) if cur_liab else None
             ext["Quick Ratio"] = _fmt_num(quick)
@@ -324,7 +319,7 @@ def main(universe, outdir):
             int_exp = av(inc_a, 0, "interestExpense")
             ext["Int. Coverage"] = _fmt_num(safe_div(ebit0, abs(int_exp)) if int_exp else None)
 
-            # Profitability: ROIC/ROE/ROA
+            # Profitability
             pretax = av(inc_a, 0, "incomeBeforeTax")
             tax = av(inc_a, 0, "incomeTaxExpense")
             tax_rate = None
@@ -340,7 +335,7 @@ def main(universe, outdir):
                 if tax_rate is not None:
                     nopat = ebit0 * (1 - tax_rate)
                 else:
-                    nopat = ebit0 * 0.79  # フォールバック: 21% 税率仮定
+                    nopat = ebit0 * 0.79  # fallback 21%
             invested_capital = None
             if tot_equity is not None:
                 invested_capital = (tot_equity or 0) + (debt_total or 0) - ((cash or 0) + (sti or 0))
@@ -356,13 +351,10 @@ def main(universe, outdir):
             ext["Capex/Sales%"] = _fmt_pct(safe_div(abs(capex), rev0) * 100.0) if (capex and rev0) else "N/A"
             ext["SBC/Sales%"] = _fmt_pct(safe_div(sbc, rev0) * 100.0) if (sbc and rev0) else "N/A"
 
-            # Dividends / payouts (approx)
+            # Dividends / payout (approx)
             div_paid = _to_f((cfs_a[0].get("dividendsPaid")) if len(cfs_a) else None)
             if div_paid is not None and ni0:
                 ext["Payout%"] = _fmt_pct(abs(div_paid) / ni0 * 100.0)
-            shares0 = sh0
-            ext["_shares"] = shares0
-            ext["_div_paid"] = div_paid
 
             # Dilution
             ext["Shares YoY%"] = _fmt_pct(pct(sh0, sh1)) if (sh0 and sh1) else "N/A"
@@ -376,31 +368,17 @@ def main(universe, outdir):
             ext["P/FCF"] = "N/A"
             ext["PEG"] = "N/A"
 
-            # Guidance/Revision / Catalysts → 体系取得困難のためN/A
+            # Guidance/Revision / Catalysts → 体系取得困難
             ext["Guidance/Revision"] = "N/A"
             ext["Catalysts"] = "N/A"
 
         except Exception as e:
             missing.append((tkr, "Extended(all)", "Missing", f"{e.__class__.__name__}"))
-            # keep defaults (N/A)
-
-        # Combine Core + Extended
-        # buyback yield second pass (needs price and shares)
-        try:
-            if ext.get("_shares") and close is not None and ext.get("_div_paid") is not None:
-                mcap = ext["_shares"] * close if ext["_shares"] else None
-                cfs_a = None  # local safety shadow
-                # Buyback（purchaseOfCommonStock）は直上で参照していないため、N/A継続
-                ext["Buyback Yield%"] = "N/A" if mcap is None else "N/A"
-        except Exception:
-            ext["Buyback Yield%"] = "N/A"
-        ext.pop("_shares", None)
-        ext.pop("_div_paid", None)
 
         row = {**core, **ext}
         rows.append(row)
 
-        # Missing for Core items（可能な範囲で記録）
+        # Missing for Core items（記録）
         for col in ["Close", "USD/JPY", "P/E(TTM)", "P/S(TTM)", "Div. Yield%", "Next Event"]:
             if row[col] in (None, "N/A"):
                 missing.append((tkr, col, "Missing", "free-source-limit"))
@@ -413,13 +391,13 @@ def main(universe, outdir):
     md_path = f"{outdir}/{d}/bloomo_eod_full.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# ユニバース日次分析テーブル（EOD・無料モード＋Alpha回転｜{d}）\n")
-        f.write("> Core列は極力100%充足。Extended列はAlpha Vantage 財務三表APIを**日割り回転**で更新し、未取得はN/A。\n\n")
+        f.write("> 価格は Yahoo 一括取得＋多層フォールバック。P/E/P/S/配当は Alpha 優先、足りない分だけ Yahoo.info を日次予算内で補完。イベントは株のみ・上位N件に限定。\n\n")
         f.write(_df_to_markdown(df))
 
     # Missing/Stale summary
     ms = pd.DataFrame(missing, columns=["銘柄", "項目", "状態", "理由"])
     with open(f"{outdir}/{d}/missing_stale.md", "w", encoding="utf-8") as f:
-        f.write("## Missing/Stale サマリー（無料ソースの制約・回転未到達など）\n\n")
+        f.write("## Missing/Stale サマリー（無料ソース制約・回転未到達・レート制御など）\n\n")
         if len(ms):
             f.write(_df_to_markdown(ms))
         else:
