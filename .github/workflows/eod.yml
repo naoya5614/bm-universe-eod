@@ -1,0 +1,50 @@
+name: Bloomo Universe EOD (Free-First)
+
+on:
+  schedule:
+    - cron: '30 11 * * *'   # 20:30 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run EOD builder (free-first, with Alpha rotation)
+        env:
+          TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          ALPHA_DAILY_BUDGET: "24"      # 1日25req制限を考慮しマージン
+          ALPHA_REFRESH_DAYS: "30"      # キャッシュ鮮度（財務三表）
+          EXTENDED_STALE_DAYS: "7"      # Extended列のStale閾値（表示用）
+          WEEKEND_SKIP: "true"          # 週末はスキップ（日本の祝日スキップは無し）
+        run: |
+          python scripts/fetch_and_build.py --universe data/universe_2025-09.csv --outdir reports
+
+      - name: Zip reports
+        run: |
+          ts=$(date -u +%Y-%m-%d)
+          cd reports && zip -r "../bloomo_eod_${ts}.zip" "$ts" || zip -r "../bloomo_eod_${ts}.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloomo-eod-zip
+          path: |
+            bloomo_eod_*.zip
+            reports/**/*
