@@ -82,7 +82,6 @@ def price_stooq(ticker: str) -> Optional[float]:
 _YF_SESSION = requests.Session()
 # Give Yahoo a sane UA; helps with some environments
 _YF_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BloomoEOD/1.0)"})
-yf.utils.set_tz_cache_location(os.path.join(os.path.dirname(__file__), "..", "cache", "yf_tz"))
 
 
 def price_yfinance(ticker: str, retries: int = 3) -> Optional[float]:
