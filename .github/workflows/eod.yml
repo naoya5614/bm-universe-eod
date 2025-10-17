@@ -1,16 +1,16 @@
-name: Bloomo Universe EOD (Free-First)
+name: EOD Universe Build
 
 on:
   schedule:
-    - cron: '30 11 * * *'   # 20:30 JST
+    - cron: '0 9 * * 1-5'   # 平日 18:00 JST
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   eod:
     runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,33 +18,41 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run EOD builder (free-first, with Alpha rotation)
-        env:
-          TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
-          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          ALPHA_DAILY_BUDGET: "24"      # 1日25req制限を考慮しマージン
-          ALPHA_REFRESH_DAYS: "30"      # 財務三表キャッシュ鮮度（日）
-          EXTENDED_STALE_DAYS: "7"      # Extended列のStale閾値（日）
-          WEEKEND_SKIP: "true"          # 週末はスキップ（日本の祝日は考慮しない）
+      - name: Build & Zip
         run: |
           python -m scripts.fetch_and_build --universe data/universe_2025-09.csv --outdir reports
-
-      - name: Zip reports
-        run: |
-          ts=$(date -u +%Y-%m-%d)
-          cd reports && zip -r "../bloomo_eod_${ts}.zip" "$ts" || zip -r "../bloomo_eod_${ts}.zip" .
+          cd reports
+          zip -r bloomo-eod-zip.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bloomo-eod-zip
-          path: |
-            bloomo_eod_*.zip
-            reports/**/*
+          path: reports/bloomo-eod-zip.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Install runtime deps for ChatGPT transfer
+        if: always()
+        run: |
+          pip install --upgrade --quiet requests
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          chmod +x scripts/send_to_chatgpt.py
+
+      - name: Send ZIP to ChatGPT (OpenAI Assistants API)
+        if: always()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
+          OPENAI_THREAD_ID: ${{ secrets.OPENAI_THREAD_ID }}
+          ZIP_GLOB: "reports/*.zip"
+          MESSAGE_JA: "本日のEOD ZIPを添付します。ユニバースのファンダメンタル更新と注目銘柄抽出をお願いします。"
+        run: |
+          python scripts/send_to_chatgpt.py
