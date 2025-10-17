@@ -52,7 +52,7 @@ BDX,Becton Dickinson,株,成長
 BEAM,Beam Therapeutics,株,成長
 BFLY,Butterfly Network,株,成長
 BIIB,Biogen,株,成長
-BK,BNY Mellon,株,成長
+BK,The Bank of New York Mellon Corporation,株,成長
 BKNG,Booking Holdings,株,成長
 BKR,Baker Hughes,株,成長
 BKSY,BlackSky Technology,株,成長
@@ -98,7 +98,7 @@ COR,Cencora,株,成長
 CORZ,Core Scientific,株,成長
 COST,Costco Wholesale,株,成長
 CPAY,Corpay,株,成長
-CPB,The Campbell's Company,株,成長
+CPB,Campbell Soup Company,株,成長
 CPNG,Coupang,株,成長
 CPRT,Copart,株,成長
 CRCL,Circle Internet Group,株,成長
@@ -170,7 +170,7 @@ FOX,Fox Corporation,株,成長
 FSLY,Fastly,株,成長
 FTNT,Fortinet,株,成長
 FTV,Fortive,株,成長
-GAP,The Gap,株,成長
+GPS,Gap,株,成長
 GD,General Dynamics,株,成長
 GDDY,GoDaddy,株,成長
 GE,GE Aerospace,株,成長
@@ -185,7 +185,7 @@ GPN,Global Payments,株,成長
 GRMN,Garmin,株,成長
 GRRR,Gorilla Technology Group,株,成長
 GS,Goldman Sachs,株,成長
-GTM,ZoomInfo Technologies,株,成長
+ZI,ZoomInfo Technologies,株,成長
 GWW,WW Grainger,株,成長
 HAL,Halliburton,株,成長
 HBAN,Huntington Bancshares,株,成長
@@ -249,7 +249,7 @@ LYFT,Lyft,株,成長
 LYV,Live Nation Entertainment,株,成長
 MA,Mastercard,株,成長
 MAR,Marriott International,株,成長
-MARA,MARA Holdings,株,成長
+MARA,Marathon Digital Holdings,株,成長
 MASS,908 Devices,株,成長
 MCD,McDonald's,株,成長
 MCHP,Microchip Technology,株,成長
@@ -274,7 +274,7 @@ MS,Morgan Stanley,株,成長
 MSCI,MSCI,株,成長
 MSFT,Microsoft,株,成長
 MSI,Motorola Solutions,株,成長
-MSTR,Strategy,株,成長
+MSTR,MicroStrategy,株,成長
 MTB,M&T Bank,株,成長
 MTD,Mettler Toledo,株,成長
 MU,Micron Technology,株,成長
@@ -311,7 +311,7 @@ PAYC,Paycom Software,株,成長
 PAYX,Paychex,株,成長
 PCAR,Paccar,株,成長
 PD,PagerDuty,株,成長
-PEG,PSEG,株,成長
+PEG,Public Service Enterprise Group,株,成長
 PEP,PepsiCo,株,成長
 PFE,Pfizer,株,成長
 PG,Procter & Gamble,株,成長
@@ -345,7 +345,7 @@ RL,Ralph Lauren Corporation,株,成長
 RMD,ResMed,株,成長
 ROK,Rockwell Automation,株,成長
 ROKU,Roku,株,成長
-ROP,Roper,株,成長
+ROP,Roper Technologies,株,成長
 ROST,Ross Stores,株,成長
 RS,Reliance,株,成長
 RSG,Republic Services,株,成長
@@ -435,10 +435,10 @@ XEL,Xcel Energy,株,成長
 XOM,Exxon Mobil,株,成長
 XRX,Xerox Holdings,株,成長
 XYL,Xylem,株,成長
-XYZ,Block,株,成長
+SQ,Block,株,成長
 YUM,Yum! Brands,株,成長
 ZG,Zillow Group,株,成長
-ZM,Zoom Communications,株,成長
+ZM,Zoom Video Communications,株,成長
 ZS,Zscaler,株,成長
 ZTS,Zoetis,株,成長
 AGG,米国総合債券 ETF,ETF,N/A

@@ -1,16 +1,18 @@
-name: Bloomo Universe EOD (Free-First)
+name: EOD Universe Build
 
 on:
+  # JST 18:00 は UTC 09:00
   schedule:
-    - cron: '30 11 * * *'   # 20:30 JST
+    - cron: '0 9 * * 1-5'   # 平日 18:00 JST
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   eod:
     runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      # あれば既存の環境変数もここに（例：APIキーは Secrets からステップで環境へ渡す）
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,33 +20,86 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install deps
+      - name: Install Python deps
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run EOD builder (free-first, with Alpha rotation)
+      # ここは既存のビルド・集計処理に合わせて調整してください
+      - name: Build & Package EOD report
         env:
           TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          ALPHA_DAILY_BUDGET: "24"      # 1日25req制限を考慮しマージン
-          ALPHA_REFRESH_DAYS: "30"      # キャッシュ鮮度（財務三表）
-          EXTENDED_STALE_DAYS: "7"      # Extended列のStale閾値（表示用）
-          WEEKEND_SKIP: "true"          # 週末はスキップ（日本の祝日スキップは無し）
+          ALPHA_DAILY_BUDGET: 24
+          ALPHA_REFRESH_DAYS: 30
+          EXTENDED_STALE_DAYS: 7
+          WEEKEND_SKIP: "false"   # 日本の休日連動を外す要件に合わせて false
         run: |
-          python scripts/fetch_and_build.py --universe data/universe_2025-09.csv --outdir reports
+          set -e
+          python -m scripts.fetch_and_build --universe data/universe_2025-09.csv --outdir reports
+          # 成果物を ZIP 化（ファイル/フォルダいずれにも対応）
+          cd reports
+          if compgen -G "*.zip" > /dev/null; then
+            echo "ZIP already exists:"
+            ls -l *.zip
+          else
+            echo "No zip found. Creating us-eod-report.zip from current directory..."
+            zip -r us-eod-report.zip .
+          fi
+          ls -l
 
-      - name: Zip reports
-        run: |
-          ts=$(date -u +%Y-%m-%d)
-          cd reports && zip -r "../bloomo_eod_${ts}.zip" "$ts" || zip -r "../bloomo_eod_${ts}.zip" .
-
-      - name: Upload artifact
+      - name: Upload artifact (us-eod-report)
         uses: actions/upload-artifact@v4
         with:
-          name: bloomo-eod-zip
-          path: |
-            bloomo_eod_*.zip
-            reports/**/*
+          name: us-eod-report
+          path: reports/us-eod-report.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      # —— ここから ChatGPT 転送のための処理（artifact を取り直してもOK）——
+      - name: Download EOD artifact
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: us-eod-report
+          path: artifact_out
+
+      - name: Inspect artifact
+        if: always()
+        run: |
+          echo "Files downloaded under artifact_out/:"
+          ls -lR artifact_out || true
+
+      # artifact がフォルダ一式でも zip でも動くように ZIP を保証
+      - name: Ensure ZIP exists
+        if: always()
+        run: |
+          set -e
+          ZIP_CANDIDATE=$(ls artifact_out/*.zip 2>/dev/null || true)
+          if [ -z "$ZIP_CANDIDATE" ]; then
+            echo "No zip found; creating zip from directory..."
+            (cd artifact_out && zip -r us-eod-report.zip .)
+            echo "ZIP_GLOB=artifact_out/us-eod-report.zip" >> $GITHUB_ENV
+          else
+            echo "Found zip: $ZIP_CANDIDATE"
+            echo "ZIP_GLOB=$ZIP_CANDIDATE" >> $GITHUB_ENV
+          fi
+
+      - name: Install runtime deps for ChatGPT transfer
+        if: always()
+        run: |
+          pip install --upgrade --quiet requests
+          chmod +x scripts/send_to_chatgpt.py
+
+      - name: Send ZIP to ChatGPT (OpenAI Assistants API)
+        if: always()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
+          # 既存のスレッドに積み上げたい場合のみ設定（なければ未設定のまま）
+          OPENAI_THREAD_ID: ${{ secrets.OPENAI_THREAD_ID }}
+          ZIP_GLOB: ${{ env.ZIP_GLOB }}
+          MESSAGE_JA: "本日のEOD ZIP（us-eod-report）を添付します。ユニバースのファンダメンタル更新と注目銘柄抽出をお願いします。"
+        run: |
+          python scripts/send_to_chatgpt.py
