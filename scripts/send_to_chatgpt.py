@@ -10,8 +10,7 @@ Env:
   ZIP_GLOB              : Optional. Glob pattern to locate ZIP (default: "reports/*.zip").
   MESSAGE_JA            : Optional. Message text in Japanese to send with the ZIP.
 """
-import os, glob, json, sys, time
-import requests
+import os, glob, sys, time, requests
 
 API = "https://api.openai.com/v1"
 HEADERS_JSON = None
@@ -47,7 +46,7 @@ def main():
     zips = sorted(glob.glob(zip_glob))
     if not zips:
         die(f"No ZIP matched: {zip_glob}")
-    zip_path = zips[-1]  # latest by name
+    zip_path = zips[-1]  # use last by name
     print(f"[INFO] Using ZIP: {zip_path}")
 
     # 1) Upload file (purpose=assistants)
@@ -95,7 +94,7 @@ def main():
     run_id = run["id"]
     print(f"[INFO] Run started run_id={run_id}")
 
-    # 4) (Optional) Poll status (log only; do not fail workflow on WIP)
+    # 4) (Optional) Poll status (log only)
     for _ in range(30):
         time.sleep(2)
         r = requests.get(f"{API}/threads/{thread_id}/runs/{run_id}",
@@ -108,7 +107,6 @@ def main():
         if st in ("completed", "failed", "cancelled", "expired"):
             break
 
-    # Export IDs to logs (for easy reuse)
     print(f"THREAD_ID={thread_id}")
     print(f"RUN_ID={run_id}")
 
