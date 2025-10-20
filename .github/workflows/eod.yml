@@ -1,9 +1,9 @@
 name: EOD Universe Build
 
 on:
-  # JST 18:00 は UTC 09:00
+  # JST 09:00 は UTC 00:00
   schedule:
-    - cron: '0 9 * * 1-5'   # 平日 18:00 JST
+    - cron: '0 0 * * 1-5'   # 平日 09:00 JST
   workflow_dispatch:
 
 jobs:
