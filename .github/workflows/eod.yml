@@ -44,16 +44,16 @@ jobs:
             echo "ZIP already exists:"
             ls -l *.zip
           else
-            echo "No zip found. Creating us-eod-report.zip from current directory..."
-            zip -r us-eod-report.zip .
+            echo "No zip found. Creating bloomo-eod-zip.zip from current directory..."
+            zip -r bloomo-eod-zip.zip .
           fi
           ls -l
 
-      - name: Upload artifact (us-eod-report)
+      - name: Upload artifact (bloomo-eod-zip)
         uses: actions/upload-artifact@v4
         with:
-          name: us-eod-report
-          path: reports/us-eod-report.zip
+          name: bloomo-eod-zip
+          path: reports/bloomo-eod-zip.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -62,11 +62,11 @@ jobs:
         run: |
           echo "## Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Name: \`us-eod-report\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Path: \`reports/us-eod-report.zip\`" >> $GITHUB_STEP_SUMMARY
-          if [ -f reports/us-eod-report.zip ]; then
-            DIGEST=$(sha256sum reports/us-eod-report.zip | awk '{print $1}')
-            SIZE=$(ls -lh reports/us-eod-report.zip | awk '{print $5}')
+          echo "- Name: \`bloomo-eod-zip\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Path: \`reports/bloomo-eod-zip.zip\`" >> $GITHUB_STEP_SUMMARY
+          if [ -f reports/bloomo-eod-zip.zip ]; then
+            DIGEST=$(sha256sum reports/bloomo-eod-zip.zip | awk '{print $1}')
+            SIZE=$(ls -lh reports/bloomo-eod-zip.zip | awk '{print $5}')
             echo "- Size: ${SIZE}" >> $GITHUB_STEP_SUMMARY
             echo "- SHA256: \`${DIGEST}\`" >> $GITHUB_STEP_SUMMARY
           else
