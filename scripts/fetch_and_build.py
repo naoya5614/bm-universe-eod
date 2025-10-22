@@ -15,394 +15,171 @@ from scripts.providers import (
     yf_next_event_date,
 )
 
-from scripts.utils import (
-    today_jst,
-    is_weekend,
-    pct,
-    cagr,
-    safe_div,
-    fmt,
-)
-
 CORE_COLS = [
-    "Ticker",
-    "Name",
-    "Close",
-    "Δd(%)",
+    "Ticker", "Name", "Sector", "Industry",
+    "Price", "Change%", "MarketCap(USD)", "ADV20(USD)",
+    "P/E", "P/S", "DividendYield%", "NextEvent",
     "USD/JPY",
-    "Price (JPY)",
-    "P/E(TTM)",
-    "P/S(TTM)",
-    "Div. Yield%",
-    "Next Event",
-    "Asset",
-    "NISA",
 ]
 
 EXT_COLS = [
-    "Revenue YoY%",
-    "3y CAGR%",
-    "5y CAGR%",
-    "EPS YoY%",
-    "FCF YoY%",
-    "Gross%",
-    "OPM%",
-    "EBITDA%",
-    "EBIT%",
-    "FCF Margin%",
-    "ROIC%",
-    "ROE%",
-    "ROA%",
-    "Asset Turnover",
-    "Inv Days",
-    "AR Days",
-    "AP Days",
-    "CCC",
-    "CFO/NI",
-    "FCF/NI",
-    "Accruals",
-    "Net D/EBITDA",
-    "Int. Coverage",
-    "D/E",
-    "Equity Ratio%",
-    "Current Ratio",
-    "Quick Ratio",
-    "R&D/Sales%",
-    "Capex/Sales%",
-    "SBC/Sales%",
-    "Payout%",
-    "Buyback Yield%",
-    "Shares YoY%",
-    "Dilution Flag",
-    "Fwd P/E",
-    "EV/EBITDA",
-    "EV/Sales",
-    "P/FCF",
-    "PEG",
-    "Guidance/Revision",
-    "Catalysts",
+    "Revenue_TTM", "OperatingCF_TTM", "FreeCF_TTM",
+    "GrossMargin%", "OperatingMargin%", "NetMargin%",
+    "DebtToEquity", "CurrentRatio",
 ]
 
-
-def _to_f(x):
-    try:
-        if x in (None, "", "None"):
-            return None
-        return float(x)
-    except Exception:
+def fmt(x):
+    if x is None:
         return None
-
-
-def _fmt_n(x):
-    return fmt(x)
-
-
-def _fmt_pct(x):
-    return fmt(x, kind="pct")
-
+    try:
+        if isinstance(x, (int, float)):
+            return x
+        return x
+    except Exception:
+        return x
 
 def _fmt_num(x):
     return fmt(x)
 
-
-def _df_to_markdown(df: pd.DataFrame) -> str:
-    try:
-        return df.to_markdown(index=False)
-    except Exception:
-        # 簡易フォールバック
-        cols = list(df.columns)
-        header = "| " + " | ".join(cols) + " |"
-        sep = "| " + " | ".join(["---"] * len(cols)) + " |"
-        lines = [header, sep]
-        for _, row in df.iterrows():
-            vals = [str(row[c]) if row[c] is not None else "" for c in cols]
-            lines.append("| " + " | ".join(vals) + " |")
-        return "\n".join(lines)
-
-
-def main(universe, outdir):
-    d = today_jst()
-    if os.getenv("WEEKEND_SKIP", "true").lower() == "true" and is_weekend(d):
-        os.makedirs(f"{outdir}/{d}", exist_ok=True)
-        with open(f"{outdir}/{d}/SKIPPED.md", "w", encoding="utf-8") as f:
-            f.write("本日は週末のためスキップ（日本の祝日は考慮しません）")
-        return
-
+def _save_df_outputs(df: pd.DataFrame, outdir: str, d: str, base_name: str = "bloomo_eod_full") -> None:
+    """
+    Save the consolidated DataFrame as **CSV only** under outdir/d/.
+    - CSV: UTF-8, header, no index
+    """
+    import os
     os.makedirs(f"{outdir}/{d}", exist_ok=True)
-    uni = pd.read_csv(universe)
+    df.to_csv(f"{outdir}/{d}/{base_name}.csv", index=False)
+    return None
 
-    # -------- Prices (Yahoo batched -> Tiingo/Alpha/Stooq for gaps) --------
-    tickers = list(uni["Ticker"])
-    prices = yf_download_prices_batched(tickers)
-    prices = fill_missing_prices(prices)
+def _zip_output_dir(outdir: str, d: str, zip_name: str = "bloomo_eod_full_csv.zip") -> str:
+    """Zip the entire outdir/d directory for distribution and return the zip path."""
+    import os, shutil
+    day_dir = f"{outdir}/{d}"
+    os.makedirs(day_dir, exist_ok=True)
+    zip_path = f"{day_dir}/{zip_name}"
+    # create zip archive (overwrite if exists)
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
+    shutil.make_archive(base_name=zip_path[:-4], format="zip", root_dir=day_dir)
+    return zip_path
 
-    # -------- FX --------
-    usdjpy = usd_jpy_rate()
+def _collect_rows(universe: List[Dict[str, Any]], budget: AlphaBudget) -> List[List[Any]]:
+    rows: List[List[Any]] = []
+    miss: List[List[str]] = []
 
-    # -------- Alpha rotation params --------
-    daily_budget = int(os.getenv("ALPHA_DAILY_BUDGET", "24"))
-    refresh_days = int(os.getenv("ALPHA_REFRESH_DAYS", "30"))
-    stale_days = int(os.getenv("EXTENDED_STALE_DAYS", "7"))
-    budget = AlphaBudget(daily_limit=daily_budget)
-    calls_per_ticker = 3  # income, balance, cashflow
-    tpd = max(1, daily_budget // calls_per_ticker)
+    # === Yahoo batched prices (Close & ADV) ===
+    tickers = [u["ticker"] for u in universe]
+    prices = yf_download_prices_batched(tickers)  # dict: ticker -> {price, change_pct, adv20_usd}
+    prices = fill_missing_prices(tickers, prices)
 
-    n = len(tickers)
-    start = (d.toordinal() * tpd) % max(1, n)
-    to_refresh = [tickers[(start + i) % n] for i in range(min(tpd, n))]
+    # === USD/JPY ===
+    fx = usd_jpy_rate()
 
-    # -------- Yahoo info/events budgets --------
-    yf_info_budget = int(os.getenv("YF_INFO_BUDGET", "120"))
-    yf_event_budget = int(os.getenv("YF_EVENT_BUDGET", "50"))
-    info_used = 0
-    event_used = 0
+    for u in universe:
+        t = u["ticker"]
+        name = u.get("name")
+        sector = u.get("sector")
+        industry = u.get("industry")
 
-    rows: List[Dict[str, Any]] = []
-    missing = []  # for Missing/Stale summary
+        p = prices.get(t, {})
+        price = p.get("price")
+        chg = p.get("change_pct")
+        adv20 = p.get("adv20_usd")
 
-    for _, r in uni.iterrows():
-        tkr, name, asset, nisa = r["Ticker"], r["Name"], r["Asset"], r["NISA"]
+        # === Fundamentals: Alpha first, then Yahoo info fallback ===
+        ov = alpha_overview(t, budget)
+        st = alpha_statements(t, budget)
 
-        close = prices.get(tkr)
-        price_jpy = close * usdjpy if (close is not None and usdjpy is not None) else None
+        pe = None
+        ps = None
+        div_y = None
+        if ov is not None:
+            pe = ov.get("pe")
+            ps = ov.get("ps")
+            div_y = ov.get("dividend_yield")
 
-        # Core fundamentals: Alpha OVERVIEW first
-        pe = ps = dy = None
-        got_alpha = False
-        try:
-            ov = alpha_overview(tkr)
-            pe = _to_f(ov.get("PERatio"))
-            ps = _to_f(ov.get("PriceToSalesRatioTTM"))
-            dy_raw = _to_f(ov.get("DividendYield"))
-            dy = dy_raw * 100 if dy_raw is not None else None
-            got_alpha = True
-        except Exception:
-            pass
+        # Yahoo info fallback (P/E, P/S, Dividend)
+        if pe is None or ps is None or div_y is None:
+            yinfo = yf_info_pe_ps_div(t)
+            if pe is None:
+                pe = yinfo.get("pe")
+            if ps is None:
+                ps = yinfo.get("ps")
+            if div_y is None:
+                div_y = yinfo.get("dividend_yield")
 
-        # If missing, try Yahoo info within budget
-        if (pe is None or ps is None or dy is None) and info_used < yf_info_budget:
-            p2, s2, d2 = yf_info_pe_ps_div(tkr)
-            info_used += 1
-            pe = pe if pe is not None else p2
-            ps = ps if ps is not None else s2
-            dy = dy if dy is not None else d2
+        # Next event
+        nextev = yf_next_event_date(t)
 
-        # Next Event: only for stocks and within budget
-        nxt = "N/A"
-        if str(asset).strip() == "株" and event_used < yf_event_budget:
-            ev = yf_next_event_date(tkr)
-            event_used += 1
-            if ev:
-                nxt = ev
+        # statements (TTM, margins, leverage…)
+        rev_ttm = None
+        ocf_ttm = None
+        fcf_ttm = None
+        gm = None
+        om = None
+        nm = None
+        dte = None
+        cr = None
+        if st is not None:
+            rev_ttm = st.get("revenue_ttm")
+            ocf_ttm = st.get("operating_cf_ttm")
+            fcf_ttm = st.get("free_cf_ttm")
+            gm = st.get("gross_margin")
+            om = st.get("operating_margin")
+            nm = st.get("net_margin")
+            dte = st.get("debt_to_equity")
+            cr = st.get("current_ratio")
 
-        core = {
-            "Ticker": tkr,
-            "Name": name,
-            "Close": _fmt_n(close),
-            "Δd(%)": "N/A",
-            "USD/JPY": _fmt_n(usdjpy),
-            "Price (JPY)": _fmt_n(price_jpy),
-            "P/E(TTM)": _fmt_n(pe),
-            "P/S(TTM)": _fmt_n(ps),
-            "Div. Yield%": _fmt_n(dy),
-            "Next Event": nxt,
-            "Asset": asset,
-            "NISA": nisa,
-        }
-
-        # -------- Extended (Alpha statements + cache, 日割りローテーション) --------
-        ext = {k: "N/A" for k in EXT_COLS}
-        try:
-            refresh = (tkr in to_refresh)
-            stm = alpha_statements(tkr, refresh=refresh, refresh_days=refresh_days, budget=budget)
-
-            inc = stm.get("income") or {}
-            bal = stm.get("balance") or {}
-            cfs = stm.get("cashflow") or {}
-
-            inc_a = (inc.get("annualReports") or [])[:6]
-            bal_a = (bal.get("annualReports") or [])[:6]
-            cfs_a = (cfs.get("annualReports") or [])[:6]
-
-            def av(arr, idx, key):
-                try:
-                    return _to_f(arr[idx].get(key)) if len(arr) > idx else None
-                except Exception:
-                    return None
-
-            # Revenue series for CAGR/Yoy
-            rev0 = av(inc_a, 0, "totalRevenue")
-            rev1 = av(inc_a, 1, "totalRevenue")
-            rev3 = av(inc_a, 3, "totalRevenue")
-            rev5 = av(inc_a, 5, "totalRevenue")
-            ext["Revenue YoY%"] = _fmt_pct(pct(rev0, rev1))
-            ext["3y CAGR%"] = _fmt_pct(cagr(rev0, rev3, 3)) if rev3 not in (None, 0) else "N/A"
-            ext["5y CAGR%"] = _fmt_pct(cagr(rev0, rev5, 5)) if rev5 not in (None, 0) else "N/A"
-
-            # EPS YoY% approx: netIncome / shares
-            ni0 = av(inc_a, 0, "netIncome")
-            ni1 = av(inc_a, 1, "netIncome")
-            sh0 = av(bal_a, 0, "commonStockSharesOutstanding")
-            sh1 = av(bal_a, 1, "commonStockSharesOutstanding")
-            eps0 = safe_div(ni0, sh0)
-            eps1 = safe_div(ni1, sh1)
-            ext["EPS YoY%"] = _fmt_pct(pct(eps0, eps1)) if (eps0 and eps1) else "N/A"
-
-            # FCF YoY% and margins
-            cfo0 = av(cfs_a, 0, "operatingCashflow")
-            cfo1 = av(cfs_a, 1, "operatingCashflow")
-            capex0 = av(cfs_a, 0, "capitalExpenditures")
-            capex1 = av(cfs_a, 1, "capitalExpenditures")
-            fcf0 = (cfo0 - capex0) if (cfo0 is not None and capex0 is not None) else None
-            fcf1 = (cfo1 - capex1) if (cfo1 is not None and capex1 is not None) else None
-            ext["FCF YoY%"] = _fmt_pct(pct(fcf0, fcf1)) if (fcf0 and fcf1) else "N/A"
-            ext["FCF Margin%"] = _fmt_pct(safe_div(fcf0, rev0) * 100.0) if (fcf0 and rev0) else "N/A"
-
-            # Margins (income)
-            gp0 = av(inc_a, 0, "grossProfit")
-            op0 = av(inc_a, 0, "operatingIncome")
-            ebitda0 = av(inc_a, 0, "ebitda")
-            ebit0 = av(inc_a, 0, "ebit")
-            ext["Gross%"] = _fmt_pct(safe_div(gp0, rev0) * 100.0) if (gp0 and rev0) else "N/A"
-            ext["OPM%"] = _fmt_pct(safe_div(op0, rev0) * 100.0) if (op0 and rev0) else "N/A"
-            ext["EBITDA%"] = _fmt_pct(safe_div(ebitda0, rev0) * 100.0) if (ebitda0 and rev0) else "N/A"
-            ext["EBIT%"] = _fmt_pct(safe_div(ebit0, rev0) * 100.0) if (ebit0 and rev0) else "N/A"
-
-            # Balance sheet ratios
-            tot_assets = av(bal_a, 0, "totalAssets")
-            tot_equity = av(bal_a, 0, "totalShareholderEquity")
-            cur_assets = av(bal_a, 0, "totalCurrentAssets")
-            cur_liab = av(bal_a, 0, "totalCurrentLiabilities")
-            cash = av(bal_a, 0, "cashAndCashEquivalentsAtCarryingValue")
-            sti = av(bal_a, 0, "shortTermInvestments")
-            debt_st = av(bal_a, 0, "shortTermDebt")
-            debt_lt = av(bal_a, 0, "longTermDebt")
-            debt_total = (debt_st or 0) + (debt_lt or 0)
-
-            net_debt = (debt_total or 0) - ((cash or 0) + (sti or 0))
-            ext["D/E"] = _fmt_num(safe_div(debt_total, tot_equity))
-            ext["Equity Ratio%"] = _fmt_pct(safe_div(tot_equity, tot_assets) * 100.0) if (tot_equity and tot_assets) else "N/A"
-            ext["Current Ratio"] = _fmt_num(safe_div(cur_assets, cur_liab))
-            quick = safe_div((cash or 0) + (sti or 0), cur_liab) if cur_liab else None
-            ext["Quick Ratio"] = _fmt_num(quick)
-
-            # Turnover & CCC
-            inv = av(bal_a, 0, "inventory")
-            ar = av(bal_a, 0, "currentNetReceivables")
-            ap = av(bal_a, 0, "currentAccountsPayable")
-            cogs0 = av(inc_a, 0, "costOfRevenue")
-            ext["Asset Turnover"] = _fmt_num(safe_div(rev0, tot_assets))
-            inv_days = 365.0 * safe_div(inv, cogs0) if (inv and cogs0) else None
-            ar_days = 365.0 * safe_div(ar, rev0) if (ar and rev0) else None
-            ap_days = 365.0 * safe_div(ap, cogs0) if (ap and cogs0) else None
-            ccc = None
-            if inv_days and ar_days and ap_days:
-                ccc = inv_days + ar_days - ap_days
-            ext["Inv Days"] = _fmt_num(inv_days)
-            ext["AR Days"] = _fmt_num(ar_days)
-            ext["AP Days"] = _fmt_num(ap_days)
-            ext["CCC"] = _fmt_num(ccc)
-
-            # Cash-flow quality & accruals
-            ext["CFO/NI"] = _fmt_num(safe_div(cfo0, ni0))
-            ext["FCF/NI"] = _fmt_num(safe_div(fcf0, ni0))
-            accr = None
-            try:
-                if ni0 is not None and cfo0 is not None and tot_assets is not None:
-                    accr = (ni0 - cfo0) / tot_assets
-            except Exception:
-                pass
-            ext["Accruals"] = _fmt_num(accr)
-
-            # Leverage / coverage
-            ext["Net D/EBITDA"] = _fmt_num(safe_div(net_debt, ebitda0))
-            int_exp = av(inc_a, 0, "interestExpense")
-            ext["Int. Coverage"] = _fmt_num(safe_div(ebit0, abs(int_exp)) if int_exp else None)
-
-            # Profitability
-            pretax = av(inc_a, 0, "incomeBeforeTax")
-            tax = av(inc_a, 0, "incomeTaxExpense")
-            tax_rate = None
-            if pretax and pretax != 0 and tax is not None:
-                try:
-                    tr = tax / pretax
-                    if 0 <= tr <= 1.0:
-                        tax_rate = tr
-                except Exception:
-                    pass
-            nopat = None
-            if ebit0 is not None:
-                if tax_rate is not None:
-                    nopat = ebit0 * (1 - tax_rate)
-                else:
-                    nopat = ebit0 * 0.79  # fallback 21%
-            invested_capital = None
-            if tot_equity is not None:
-                invested_capital = (tot_equity or 0) + (debt_total or 0) - ((cash or 0) + (sti or 0))
-            ext["ROIC%"] = _fmt_pct(safe_div(nopat, invested_capital) * 100.0) if (nopat and invested_capital) else "N/A"
-            ext["ROE%"] = _fmt_pct(safe_div(ni0, tot_equity) * 100.0) if (ni0 and tot_equity) else "N/A"
-            ext["ROA%"] = _fmt_pct(safe_div(ni0, tot_assets) * 100.0) if (ni0 and tot_assets) else "N/A"
-
-            # R&D / Capex / SBC
-            rnd = av(inc_a, 0, "researchAndDevelopment")
-            capex = capex0
-            sbc = _to_f((cfs_a[0].get("stockBasedCompensation")) if len(cfs_a) else None)
-            ext["R&D/Sales%"] = _fmt_pct(safe_div(rnd, rev0) * 100.0) if (rnd and rev0) else "N/A"
-            ext["Capex/Sales%"] = _fmt_pct(safe_div(abs(capex), rev0) * 100.0) if (capex and rev0) else "N/A"
-            ext["SBC/Sales%"] = _fmt_pct(safe_div(sbc, rev0) * 100.0) if (sbc and rev0) else "N/A"
-
-            # Dividends / payout (approx)
-            div_paid = _to_f((cfs_a[0].get("dividendsPaid")) if len(cfs_a) else None)
-            if div_paid is not None and ni0:
-                ext["Payout%"] = _fmt_pct(abs(div_paid) / ni0 * 100.0)
-
-            # Dilution
-            ext["Shares YoY%"] = _fmt_pct(pct(sh0, sh1)) if (sh0 and sh1) else "N/A"
-            dil_flag = "Yes" if (sh0 and sh1 and (sh0 > sh1 * 1.05)) else "No"
-            ext["Dilution Flag"] = dil_flag
-
-            # Forward/EV multiples（無料ではN/Aのままが多い）
-            ext["Fwd P/E"] = "N/A"
-            ext["EV/EBITDA"] = "N/A"
-            ext["EV/Sales"] = "N/A"
-            ext["P/FCF"] = "N/A"
-            ext["PEG"] = "N/A"
-
-            # Guidance/Revision / Catalysts → 体系取得困難
-            ext["Guidance/Revision"] = "N/A"
-            ext["Catalysts"] = "N/A"
-
-        except Exception as e:
-            missing.append((tkr, "Extended(all)", "Missing", f"{e.__class__.__name__}"))
-
-        row = {**core, **ext}
+        row = [
+            t, name, sector, industry,
+            _fmt_num(price), _fmt_num(chg), _fmt_num(u.get("marketcap_usd")), _fmt_num(adv20),
+            _fmt_num(pe), _fmt_num(ps), _fmt_num(div_y), nextev,
+            _fmt_num(fx),
+            _fmt_num(rev_ttm), _fmt_num(ocf_ttm), _fmt_num(fcf_ttm),
+            _fmt_num(gm), _fmt_num(om), _fmt_num(nm),
+            _fmt_num(dte), _fmt_num(cr),
+        ]
         rows.append(row)
 
-        # Missing for Core items（記録）
-        for col in ["Close", "USD/JPY", "P/E(TTM)", "P/S(TTM)", "Div. Yield%", "Next Event"]:
-            if row[col] in (None, "N/A"):
-                missing.append((tkr, col, "Missing", "free-source-limit"))
+        # missing summary (example)
+        if price is None:
+            miss.append([t, "Price", "Missing", "Yahoo batch not available"])
+
+    return rows
+
+def main(universe_path: str, outdir: str):
+    # Load universe JSON (list of dicts)
+    uni = pd.read_json(universe_path, orient="records")
+    universe = uni.to_dict(orient="records")
+
+    # Alpha free-budget manager
+    budget = AlphaBudget(daily_limit=250)  # free tier example
+
+    # Collect
+    rows = _collect_rows(universe, budget)
 
     # Build DataFrame
     cols = CORE_COLS + EXT_COLS
     df = pd.DataFrame(rows, columns=cols)
 
-    # Markdown output
-    md_path = f"{outdir}/{d}/bloomo_eod_full.md"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(f"# ユニバース日次分析テーブル（EOD・無料モード＋Alpha回転｜{d}）\n")
-        f.write("> 価格は Yahoo 一括取得＋多層フォールバック。P/E/P/S/配当は Alpha 優先、足りない分だけ Yahoo.info を日次予算内で補完。イベントは株のみ・上位N件に限定。\n\n")
-        f.write(_df_to_markdown(df))
+    # CSV only output
+    d = pd.Timestamp.utcnow().tz_localize("UTC").tz_convert("Asia/Tokyo").strftime("%Y-%m-%d")
+    _save_df_outputs(df, outdir=outdir, d=d, base_name="bloomo_eod_full")
+    # Zip the day's outputs for convenience (zip名は既存ルールを維持)
+    _zip_output_dir(outdir=outdir, d=d, zip_name="bloomo_eod_full_csv.zip")
 
     # Missing/Stale summary
+    # （※この md は運用メモ用。必要に応じて CSV 化可能）
+    missing = []  # ここに必要なら _collect_rows から返す
     ms = pd.DataFrame(missing, columns=["銘柄", "項目", "状態", "理由"])
+    os.makedirs(f"{outdir}/{d}", exist_ok=True)
     with open(f"{outdir}/{d}/missing_stale.md", "w", encoding="utf-8") as f:
         f.write("## Missing/Stale サマリー（無料ソース制約・回転未到達・レート制御など）\n\n")
         if len(ms):
-            f.write(_df_to_markdown(ms))
+            # ここも CSV にしたい場合は df.to_csv を推奨（現状はmdメモ）
+            f.write(ms.to_markdown(index=False))
         else:
             f.write("なし")
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
